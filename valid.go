@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const tagKey = "binding"
@@ -50,11 +51,16 @@ func Valid(s any, path ...string) error {
 		switch value.Kind() {
 		case reflect.Struct:
 			// if this field is a struct, validate it recursively(递归地)
-			if err := Valid(value.Interface(), fullPath); err != nil {
-				// attach the field name to the error
-				return fmt.Errorf("%s.%w", field.Name, err)
+			if value.Type() == reflect.TypeOf(time.Time{}) {
+				// not handle yet.
+			} else {
+				if err := Valid(value.Interface(), fullPath); err != nil {
+					// attach the field name to the error
+					return fmt.Errorf("%s.%w", field.Name, err)
+				}
+				continue
 			}
-			continue
+
 		case reflect.Pointer:
 			// if it's a pointer to a struct, unwrap it and validate recursively
 			if !value.IsNil() && value.Elem().Kind() == reflect.Struct {
@@ -92,6 +98,9 @@ func Valid(s any, path ...string) error {
 				if len(parts) != 2 {
 					continue
 				}
+				// Here's the issue:
+				// For example, with `ID int 'binding:"min=1,max=100,omitempty'"`
+				// If the field is empty and `omitempty` is set, it will skip all checks
 				if isEmpty(value) && hasOmitempty {
 					continue
 				}
@@ -129,6 +138,11 @@ func isEmpty(v reflect.Value) bool {
 		return v.Float() == 0
 	case reflect.Interface, reflect.Pointer:
 		return v.IsNil()
+	case reflect.Struct:
+		// time.Time
+		if v.Type() == reflect.TypeOf(time.Time{}) {
+			return v.Interface().(time.Time).IsZero()
+		}
 	}
 	return false
 }
@@ -193,6 +207,39 @@ func compareValue(v reflect.Value, op, param, fieldName string) error {
 		case "max":
 			if length > num {
 				return fmt.Errorf("%s can have at most %d items/characters", fieldName, num)
+			}
+		}
+	case reflect.Struct:
+		if v.Type() == reflect.TypeOf(time.Time{}) {
+			// convert time to the local time zone
+			// use RFC3339 format
+			t, err := time.Parse(time.RFC3339, param)
+			if err != nil {
+				return fmt.Errorf("%s has an invalid date format for %s", fieldName, op)
+			}
+			fieldTime := v.Interface().(time.Time)
+
+			// convert both fieldTime and param time to local timezone
+			fieldTime = fieldTime.In(time.Local)
+			t = t.In(time.Local)
+
+			switch op {
+			case "min":
+				if fieldTime.Before(t) {
+					return fmt.Errorf("%s must be after %s", fieldName, t.Format(time.RFC3339))
+				}
+			case "max":
+				if fieldTime.After(t) {
+					return fmt.Errorf("%s must be before %s", fieldName, t.Format(time.RFC3339))
+				}
+			case "gte":
+				if fieldTime.Before(t) {
+					return fmt.Errorf("%s must be at or after %s", fieldName, t.Format(time.RFC3339))
+				}
+			case "lte":
+				if fieldTime.After(t) {
+					return fmt.Errorf("%s must be at or before %s", fieldName, t.Format(time.RFC3339))
+				}
 			}
 		}
 
